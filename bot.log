@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "bot.py", line 5, in <module>
+    from telegram import Update
+ModuleNotFoundError: No module named 'telegram'
