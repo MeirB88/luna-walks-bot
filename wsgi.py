@@ -1,16 +1,12 @@
 import asyncio
-from bot import DogWalkBot
+from bot import bot
 
-# יצירת אינסטנס של הבוט
-bot = DogWalkBot()
+# הגדרת event loop חדש
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 # הפעלת הבוט ברקע
-async def init():
-    await bot.setup_and_run()
-
-# הגדרת event loop והפעלת הבוט
-loop = asyncio.get_event_loop()
-loop.create_task(init())
+loop.create_task(bot.setup_and_run())
 
 # יצוא האפליקציה עבור gunicorn
 app = bot.web_app
