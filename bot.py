@@ -1,8 +1,10 @@
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 import asyncio
-import gc  # יבוא מודול garbage collector לניהול זיכרון
+import gc
+from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackContext
 from config import TELEGRAM_TOKEN, KEYWORDS, DATA_FILE
@@ -15,37 +17,60 @@ class DogWalkBot:
     def __init__(self):
         """
         אתחול הבוט
+        כולל הגדרת הלוגר ומשתני המצב הבסיסיים
         """
         self.logger = setup_logger('DogWalkBot')
         self.token = TELEGRAM_TOKEN
         self.keywords = KEYWORDS
         self.walks_data = self.load_data()
         self.application = None
-        self.cleanup_task = None  # משתנה חדש לשמירת המשימה של ניקוי הזיכרון
+        self.cleanup_task = None
+        self.web_app = None  # אובייקט חדש לשרת האינטרנט
         self.logger.info("Bot initialized")
     
     async def periodic_cleanup(self):
         """
-        פונקציה חדשה שמבצעת ניקוי זיכרון תקופתי.
-        רצה כל שעה ומנקה זיכרון שלא בשימוש כדי למנוע דליפות.
+        פונקציה שמבצעת ניקוי זיכרון תקופתי
+        רצה כל שעה ומנקה זיכרון שלא בשימוש
         """
         while True:
             try:
-                # המתנה של שעה בין ניקויים
-                await asyncio.sleep(3600)
-                
-                # הפעלת garbage collector באופן מפורש
-                collected = gc.collect()
-                
-                # תיעוד תוצאות הניקוי
+                await asyncio.sleep(3600)  # המתנה של שעה
+                collected = gc.collect()    # הפעלת garbage collector
                 self.logger.info(f"Memory cleanup completed - {collected} objects collected")
-                
             except Exception as e:
                 self.logger.error(f"Error during memory cleanup: {str(e)}")
+
+    async def setup_web_server(self):
+        """
+        הגדרת שרת אינטרנט בסיסי עבור Render
+        מספק נקודת קצה לבדיקת תקינות
+        """
+        self.web_app = web.Application()
+        self.web_app.router.add_get("/", self.health_check)
+        self.web_app.router.add_get("/health", self.health_check)
+        
+        # הגדרת הפורט מתוך משתני הסביבה או ברירת מחדל
+        port = int(os.environ.get("PORT", 8080))
+        
+        # הפעלת השרת
+        runner = web.AppRunner(self.web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        self.logger.info(f"Web server started on port {port}")
+    
+    async def health_check(self, request):
+        """
+        נקודת קצה לבדיקת תקינות הבוט
+        מחזירה סטטוס בסיסי ומידע על זמן ריצה
+        """
+        return web.Response(text="Bot is running", status=200)
     
     def load_data(self) -> dict:
         """
         טעינת נתונים מקובץ JSON
+        מנסה לטעון את הקובץ הקיים, ואם לא מצליח, יוצר מבנה ברירת מחדל
         """
         try:
             if DATA_FILE.exists():
@@ -56,7 +81,7 @@ class DogWalkBot:
         except Exception as e:
             self.logger.error(f"Error loading data: {str(e)}")
         
-        # יצירת מבנה ברירת מחדל
+        # יצירת מבנה ברירת מחדל אם אין קובץ או שיש שגיאה
         default_data = {
             "users": {},
             "current_month": datetime.now().strftime("%Y-%m")
@@ -65,10 +90,11 @@ class DogWalkBot:
         return default_data
     
     def save_data(self):
-        """
-        שמירת נתונים לקובץ JSON
-        """
+        """שמירת נתונים לקובץ JSON"""
         try:
+            # יצירת תיקיית הנתונים אם לא קיימת
+            DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+            
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.walks_data, f, ensure_ascii=False, indent=2)
             self.logger.info("Data saved successfully")
@@ -76,9 +102,7 @@ class DogWalkBot:
             self.logger.error(f"Error saving data: {str(e)}")
 
     def get_display_name(self, original_name: str) -> str:
-        """
-        המרת שמות משתמשים מיוחדים
-        """
+        """המרת שמות משתמשים מיוחדים לשמות תצוגה"""
         if original_name == "nothing":
             return "מאיר"
         elif original_name == "Mati Noah":
@@ -86,27 +110,20 @@ class DogWalkBot:
         return original_name
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        טיפול בפקודת /start
-        """
+        """טיפול בפקודת /start"""
         self.logger.info(f"Start command received from user {update.effective_user.id}")
         await update.message.reply_text("ברוכים הבאים לבוט מעקב טיולי כלבים! 🐕")
     
     async def test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        טיפול בפקודת /test
-        """
+        """טיפול בפקודת /test"""
         self.logger.info(f"Test command received from user {update.effective_user.id}")
         await update.message.reply_text("הבוט פעיל ועובד! 🐾")
 
     async def generate_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        טיפול בפקודת /sum - יצירת דוח סיכום
-        """
+        """יצירת דוח סיכום חודשי"""
         self.logger.info(f"Summary command received from user {update.effective_user.id}")
         summary = self.calculate_monthly_summary()
         
-        # יצירת הודעת סיכום
         message = "📊 סיכום טיולים חודשי:\n\n"
         
         for user_id, data in summary.items():
@@ -122,15 +139,11 @@ class DogWalkBot:
         await update.message.reply_text(message)
 
     def calculate_monthly_summary(self) -> dict:
-        """
-        חישוב סיכום חודשי של טיולים ותשלומים
-        """
+        """חישוב סיכום חודשי של טיולים ותשלומים"""
         summary = {}
         for user_id, data in self.walks_data["users"].items():
             walks = data.get("walks", 0)
-            total_amount = walks * 40  # כל טיול שווה 40 ש"ח
-            
-            # המרת שמות משתמשים מיוחדים
+            total_amount = walks * 40
             name = self.get_display_name(data.get("name", "משתמש לא ידוע"))
             
             summary[user_id] = {
@@ -139,7 +152,6 @@ class DogWalkBot:
                 "amount": total_amount
             }
         
-        # מציאת המנצח
         if len(summary) >= 2:
             amounts = [(user_id, data["amount"]) for user_id, data in summary.items()]
             winner = max(amounts, key=lambda x: x[1])
@@ -153,9 +165,7 @@ class DogWalkBot:
         return summary
 
     async def del_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        טיפול בפקודת /del - התחלת תהליך מחיקת נתונים
-        """
+        """התחלת תהליך מחיקת נתונים"""
         self.logger.info(f"Delete command received from user {update.effective_user.id}")
         await update.message.reply_text(
             "🚨 האם אתה בטוח שברצונך למחוק את כל נתוני הטיולים?\n"
@@ -164,9 +174,7 @@ class DogWalkBot:
         return CONFIRM_DELETE
 
     async def confirm_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        טיפול באישור מחיקת נתונים
-        """
+        """טיפול באישור מחיקת נתונים"""
         response = update.message.text.strip()
         
         if response == 'כן':
@@ -181,16 +189,12 @@ class DogWalkBot:
         return ConversationHandler.END
 
     async def unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        טיפול בפקודות לא מוכרות
-        """
+        """טיפול בפקודות לא מוכרות"""
         self.logger.info(f"Unknown command received: {update.message.text}")
         await update.message.reply_text("❌ פקודה לא מוכרת")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        טיפול בהודעות רגילות
-        """
+        """טיפול בהודעות רגילות"""
         if not update.message or not update.message.text:
             self.logger.warning("Received update without message or text")
             return
@@ -202,30 +206,27 @@ class DogWalkBot:
         
         self.logger.info(f"Message received: '{text}' from {display_name} ({user_id})")
         
-        # בדיקת מילות מפתח
         if any(keyword.lower() in text for keyword in self.keywords):
             self.logger.info(f"Keyword found in message from {display_name}")
             
-            # עדכון נתונים
             if user_id not in self.walks_data["users"]:
                 self.walks_data["users"][user_id] = {"name": original_name, "walks": 0}
             
             self.walks_data["users"][user_id]["walks"] += 1
             self.save_data()
             
-            # שליחת אישור
             await update.message.reply_text(
                 f"✅ נרשם טיול חדש!\n"
                 f"🦮 מספר טיולים החודש: {self.walks_data['users'][user_id]['walks']}"
             )
-    
-    def run(self):
+
+    async def run_bot(self):
         """
-        הפעלת הבוט
-        התוספת החדשה היא הפעלת משימת ניקוי הזיכרון התקופתית
+        הפעלת הבוט והשרת במקביל
+        משתמש ב-asyncio להרצת שניהם בו-זמנית
         """
         try:
-            # יצירת האפליקציה
+            # הגדרת האפליקציה
             self.application = Application.builder().token(self.token).build()
             
             # הגדרת Conversation Handler למחיקת נתונים
@@ -242,11 +243,7 @@ class DogWalkBot:
             self.application.add_handler(CommandHandler("test", self.test))
             self.application.add_handler(CommandHandler("sum", self.generate_summary))
             self.application.add_handler(delete_conv_handler)
-            
-            # Handler לפקודות לא מוכרות - חייב להיות אחרון!
             self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
-            
-            # Handler להודעות רגילות
             self.application.add_handler(MessageHandler(
                 filters.TEXT & ~filters.COMMAND, 
                 self.handle_message
@@ -256,14 +253,34 @@ class DogWalkBot:
             self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
             self.logger.info("Memory cleanup task started")
             
+            # הגדרת והפעלת שרת האינטרנט
+            await self.setup_web_server()
+            
             # הפעלת הבוט
             self.logger.info("Starting bot...")
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+            await self.application.run_polling(allowed_updates=Update.ALL_TYPES)
             
         except Exception as e:
             self.logger.error(f"Error running bot: {str(e)}")
             raise e
 
-if __name__ == "__main__":
+def main():
+    """
+    פונקציית הפעלה ראשית
+    מגדירה event loop ומפעילה את הבוט
+    """
     bot = DogWalkBot()
-    bot.run()
+    
+    # הגדרת והפעלת event loop
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(bot.run_bot())
+    except KeyboardInterrupt:
+        bot.logger.info("Bot stopped by user")
+    except Exception as e:
+        bot.logger.error(f"Bot stopped due to error: {str(e)}")
+    finally:
+        loop.close()
+
+if __name__ == "__main__":
+    main()
