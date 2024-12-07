@@ -16,8 +16,8 @@ CONFIRM_DELETE = 1
 class DogWalkBot:
     def __init__(self):
         """
-        אתחול הבוט
-        כולל הגדרת הלוגר, משתני המצב הבסיסיים ושרת האינטרנט
+        אתחול הבוט והגדרת המשתנים הבסיסיים
+        מגדיר את הלוגר, מאתחל את ה-web app ומכין את כל הדברים הנדרשים
         """
         self.logger = setup_logger('DogWalkBot')
         self.token = TELEGRAM_TOKEN
@@ -25,9 +25,55 @@ class DogWalkBot:
         self.walks_data = self.load_data()
         self.application = None
         self.cleanup_task = None
-        self.web_app = web.Application()  # יצירת אפליקציית Web
-        self.web_app.router.add_get("/", self.health_check)  # הוספת נתיב בדיקת תקינות
+        
+        # הגדרת שרת האינטרנט
+        self.web_app = web.Application()
+        self.web_app.router.add_get("/", self.health_check)
+        self.web_app.router.add_get("/health", self.health_check)
+        
         self.logger.info("Bot initialized")
+    
+    async def setup_and_run(self):
+        """
+        פונקציה חדשה שמאתחלת ומפעילה את הבוט
+        משמשת כנקודת כניסה עיקרית כשמריצים דרך wsgi.py
+        """
+        try:
+            # הגדרת הבוט
+            await self.setup_bot()
+            # הפעלת משימת ניקוי הזיכרון
+            self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
+            # הפעלת הבוט
+            await self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        except Exception as e:
+            self.logger.error(f"Error in setup_and_run: {str(e)}")
+            raise e
+    
+    async def setup_bot(self):
+        """
+        הגדרת הבוט והוספת כל ה-handlers הנדרשים
+        """
+        self.application = Application.builder().token(self.token).build()
+        
+        # הגדרת Conversation Handler למחיקת נתונים
+        delete_conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('del', self.del_command)],
+            states={
+                CONFIRM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_delete)]
+            },
+            fallbacks=[]
+        )
+        
+        # הוספת handlers
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("test", self.test))
+        self.application.add_handler(CommandHandler("sum", self.generate_summary))
+        self.application.add_handler(delete_conv_handler)
+        self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            self.handle_message
+        ))
     
     async def periodic_cleanup(self):
         """
@@ -45,14 +91,12 @@ class DogWalkBot:
     async def health_check(self, request):
         """
         נקודת קצה לבדיקת תקינות הבוט
+        משמשת את Render לבדיקה שהשירות פעיל
         """
         return web.Response(text="Bot is running and healthy!")
     
     def load_data(self) -> dict:
-        """
-        טעינת נתונים מקובץ JSON
-        מנסה לטעון את הקובץ הקיים, ואם לא מצליח, יוצר מבנה ברירת מחדל
-        """
+        """טעינת נתונים מקובץ JSON"""
         try:
             if DATA_FILE.exists():
                 with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -62,7 +106,6 @@ class DogWalkBot:
         except Exception as e:
             self.logger.error(f"Error loading data: {str(e)}")
         
-        # יצירת מבנה ברירת מחדל
         default_data = {
             "users": {},
             "current_month": datetime.now().strftime("%Y-%m")
@@ -73,9 +116,7 @@ class DogWalkBot:
     def save_data(self):
         """שמירת נתונים לקובץ JSON"""
         try:
-            # יצירת תיקיית הנתונים אם לא קיימת
             DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-            
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.walks_data, f, ensure_ascii=False, indent=2)
             self.logger.info("Data saved successfully")
@@ -83,7 +124,7 @@ class DogWalkBot:
             self.logger.error(f"Error saving data: {str(e)}")
 
     def get_display_name(self, original_name: str) -> str:
-        """המרת שמות משתמשים מיוחדים לשמות תצוגה"""
+        """המרת שמות משתמשים מיוחדים"""
         if original_name == "nothing":
             return "מאיר"
         elif original_name == "Mati Noah":
@@ -175,7 +216,7 @@ class DogWalkBot:
         await update.message.reply_text("❌ פקודה לא מוכרת")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """טיפול בהודעות רגילות"""
+        """טיפול בהודעות רגילות וזיהוי טיולים"""
         if not update.message or not update.message.text:
             self.logger.warning("Received update without message or text")
             return
@@ -201,51 +242,10 @@ class DogWalkBot:
                 f"🦮 מספר טיולים החודש: {self.walks_data['users'][user_id]['walks']}"
             )
 
-    async def run_bot(self):
-        """
-        הפעלת הבוט
-        מגדיר את כל ה-handlers ומפעיל את הבוט
-        """
-        try:
-            # הגדרת האפליקציה
-            self.application = Application.builder().token(self.token).build()
-            
-            # הגדרת Conversation Handler למחיקת נתונים
-            delete_conv_handler = ConversationHandler(
-                entry_points=[CommandHandler('del', self.del_command)],
-                states={
-                    CONFIRM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_delete)]
-                },
-                fallbacks=[]
-            )
-            
-            # הוספת handlers
-            self.application.add_handler(CommandHandler("start", self.start))
-            self.application.add_handler(CommandHandler("test", self.test))
-            self.application.add_handler(CommandHandler("sum", self.generate_summary))
-            self.application.add_handler(delete_conv_handler)
-            self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
-            self.application.add_handler(MessageHandler(
-                filters.TEXT & ~filters.COMMAND, 
-                self.handle_message
-            ))
-            
-            # הפעלת משימת ניקוי הזיכרון התקופתית
-            self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
-            self.logger.info("Memory cleanup task started")
-            
-            # הפעלת הבוט
-            self.logger.info("Starting bot...")
-            await self.application.run_polling(allowed_updates=Update.ALL_TYPES)
-            
-        except Exception as e:
-            self.logger.error(f"Error running bot: {str(e)}")
-            raise e
-
-# יצירת אינסטנס גלובלי של הבוט
+# יצירת אינסטנס גלובלי של הבוט ושל ה-web app לשימוש gunicorn
 bot = DogWalkBot()
 app = bot.web_app
 
 if __name__ == "__main__":
-    # הרצת הבוט רק אם מריצים את הקובץ ישירות
-    asyncio.run(bot.run_bot())
+    # הרצת הבוט כאשר מריצים את הקובץ ישירות
+    asyncio.run(bot.setup_and_run())
