@@ -35,45 +35,64 @@ class DogWalkBot:
     
     async def setup_and_run(self):
         """
-        פונקציה חדשה שמאתחלת ומפעילה את הבוט
-        משמשת כנקודת כניסה עיקרית כשמריצים דרך wsgi.py
+        פונקציה שמאתחלת ומפעילה את הבוט
+        כוללת את כל ההגדרות וההפעלה של הבוט
         """
         try:
             # הגדרת הבוט
-            await self.setup_bot()
-            # הפעלת משימת ניקוי הזיכרון
+            self.application = Application.builder().token(self.token).build()
+            
+            # הגדרת Conversation Handler למחיקת נתונים
+            delete_conv_handler = ConversationHandler(
+                entry_points=[CommandHandler('del', self.del_command)],
+                states={
+                    CONFIRM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_delete)]
+                },
+                fallbacks=[]
+            )
+            
+            # הוספת handlers
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(CommandHandler("test", self.test))
+            self.application.add_handler(CommandHandler("sum", self.generate_summary))
+            self.application.add_handler(delete_conv_handler)
+            self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
+            self.application.add_handler(MessageHandler(
+                filters.TEXT & ~filters.COMMAND, 
+                self.handle_message
+            ))
+            
+            # אתחול והפעלת הבוט
+            await self.application.initialize()
+            await self.application.start()
+            
+            # הפעלת משימת ניקוי הזיכרון התקופתית
             self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
-            # הפעלת הבוט
-            await self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+            self.logger.info("Bot setup completed")
+            
+            # הפעלת הפולינג
+            await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            self.logger.info("Bot polling started")
+            
+            # שמירה על הבוט פעיל
+            while True:
+                await asyncio.sleep(3600)  # בדיקה כל שעה
+                
         except Exception as e:
             self.logger.error(f"Error in setup_and_run: {str(e)}")
+            if self.application:
+                await self.application.stop()
+                await self.application.shutdown()
             raise e
     
-    async def setup_bot(self):
+    async def health_check(self, request):
         """
-        הגדרת הבוט והוספת כל ה-handlers הנדרשים
+        נקודת קצה לבדיקת תקינות הבוט
         """
-        self.application = Application.builder().token(self.token).build()
-        
-        # הגדרת Conversation Handler למחיקת נתונים
-        delete_conv_handler = ConversationHandler(
-            entry_points=[CommandHandler('del', self.del_command)],
-            states={
-                CONFIRM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.confirm_delete)]
-            },
-            fallbacks=[]
-        )
-        
-        # הוספת handlers
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("test", self.test))
-        self.application.add_handler(CommandHandler("sum", self.generate_summary))
-        self.application.add_handler(delete_conv_handler)
-        self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
-        self.application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND, 
-            self.handle_message
-        ))
+        status = "Bot is running"
+        if self.application and self.application.updater.running:
+            status += " and polling"
+        return web.Response(text=status)
     
     async def periodic_cleanup(self):
         """
@@ -87,13 +106,6 @@ class DogWalkBot:
                 self.logger.info(f"Memory cleanup completed - {collected} objects collected")
             except Exception as e:
                 self.logger.error(f"Error during memory cleanup: {str(e)}")
-    
-    async def health_check(self, request):
-        """
-        נקודת קצה לבדיקת תקינות הבוט
-        משמשת את Render לבדיקה שהשירות פעיל
-        """
-        return web.Response(text="Bot is running and healthy!")
     
     def load_data(self) -> dict:
         """טעינת נתונים מקובץ JSON"""
@@ -242,10 +254,9 @@ class DogWalkBot:
                 f"🦮 מספר טיולים החודש: {self.walks_data['users'][user_id]['walks']}"
             )
 
-# יצירת אינסטנס גלובלי של הבוט ושל ה-web app לשימוש gunicorn
+# יצירת אינסטנס גלובלי של הבוט
 bot = DogWalkBot()
-app = bot.web_app
 
 if __name__ == "__main__":
-    # הרצת הבוט כאשר מריצים את הקובץ ישירות
+    # הרצה ישירה של הבוט (לא דרך gunicorn)
     asyncio.run(bot.setup_and_run())

@@ -1,24 +1,26 @@
-import asyncio
+from aiohttp import web
 from bot import bot
 
-# הגדרת event loop חדש
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
+async def start_background_tasks(app):
+    """
+    הפעלת משימות רקע (כמו הבוט) כשהשרת עולה
+    """
+    app['bot_task'] = app.loop.create_task(bot.setup_and_run())
 
-# פונקציה שמפעילה את הבוט ומחכה שהוא יתחיל לעבוד
-async def init_bot():
-    try:
-        await bot.setup_and_run()
-    except Exception as e:
-        print(f"Error starting bot: {e}")
-        raise e
+async def cleanup_background_tasks(app):
+    """
+    ניקוי משימות רקע כשהשרת נסגר
+    """
+    if bot.application:
+        try:
+            await bot.application.stop()
+            await bot.application.shutdown()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
 
-# הפעלת הבוט בתהליך הרקע
-loop.create_task(init_bot())
+# הוספת הפונקציות למחזור החיים של השרת
+bot.web_app.on_startup.append(start_background_tasks)
+bot.web_app.on_cleanup.append(cleanup_background_tasks)
 
 # יצוא האפליקציה עבור gunicorn
 app = bot.web_app
-
-# וידוא שה-loop רץ
-if not loop.is_running():
-    loop.run_forever()
